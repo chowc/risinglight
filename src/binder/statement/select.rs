@@ -38,10 +38,11 @@ impl Binder {
         // Bind table ref
         let mut from_table = if select.from.is_empty() {
             None
-        } else if select.from.len() == 1 {
+        } else if select.from.len() == 1 { // select * from t1 join t2;
             Some(self.bind_table_with_joins(&select.from[0])?)
         } else {
-            // Bind cross join
+            // Bind cross join.
+            // "select * from t1, t2"
             let relation = self.bind_table_ref(&select.from[0].relation)?;
             assert!(select.from[0].joins.is_empty());
             let mut join_tables = vec![];
@@ -51,6 +52,7 @@ impl Binder {
                 let join_ref = BoundedSingleJoinTableRef {
                     table_ref: (join_table.into()),
                     join_op: BoundJoinOperator::Inner,
+                    // always true
                     join_cond: Constant(Bool(true)),
                 };
                 join_tables.push(join_ref);
@@ -62,7 +64,7 @@ impl Binder {
         };
 
         let where_clause = select
-            .selection
+            .selection // where 条件
             .as_ref()
             .map(|expr| self.bind_expr(expr))
             .transpose()?;
@@ -80,7 +82,7 @@ impl Binder {
         // Bind the select list.
         let mut select_list = vec![];
         // let mut return_names = vec![];
-        for item in &select.projection {
+        for item in &select.projection { // select a, b, c
             match item {
                 SelectItem::UnnamedExpr(expr) => {
                     let expr = self.bind_expr(expr)?;

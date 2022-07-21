@@ -4,3 +4,5 @@
 /tpch-dbgen
 /.vscode
 .gdb_history
+tests/sqllogictest/tests/gen/
+.gitignore

@@ -32,6 +32,8 @@ macro_rules! def_rewriter {
       fn rewrite(&mut self, plan: PlanRef) -> PlanRef{
         match plan.node_type() {
         $(
+          // 将 PlanRef.rewrite 方法重写为调用 PlanRef.rewrite_xxx 方法，其中 xxx 是 PlanRef 的类型名的 snake。
+          // 这些方法在 InputRefResolver 中实现。
           PlanNodeType::$node => self.[<rewrite_ $node:snake>](plan.downcast_ref::<$node>().unwrap()),
         )*
         }
