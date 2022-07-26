@@ -56,6 +56,7 @@ pub trait ExprVisitor {
 }
 
 pub trait ExprRewriter {
+    // 空的 rewrite，对于运算符和 IS NULL 等判断，进一步拆分为运算符两边的 expr rewrite。
     fn rewrite_expr(&self, expr: &mut BoundExpr) {
         match expr {
             BoundExpr::Constant(_) => self.rewrite_constant(expr),

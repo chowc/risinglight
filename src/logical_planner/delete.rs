@@ -12,11 +12,12 @@ impl LogicalPlaner {
         if let BoundTableRef::BaseTableRef { ref ref_id, .. } = stmt.from_table {
             if let Some(expr) = stmt.where_clause {
                 let child = self.plan_table_ref(&stmt.from_table, true, false)?;
+                // delete 下挂一个 Filter Child
                 Ok(Arc::new(LogicalDelete::new(
                     *ref_id,
                     Arc::new(LogicalFilter::new(expr, child)),
                 )))
-            } else {
+            } else { // 不带 where 的 delete
                 let mut stmt = stmt;
                 stmt.where_clause = Some(BoundExpr::Constant(DataValue::Bool(true)));
                 self.plan_delete(stmt)

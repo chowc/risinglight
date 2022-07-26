@@ -9,6 +9,7 @@
 //! - [`LogicalProjection`] (select *)
 //! - [`LogicalOrder`] (order by *)
 use itertools::Itertools;
+use tracing::info;
 
 use super::*;
 use crate::binder::{
@@ -23,13 +24,13 @@ use crate::optimizer::plan_nodes::{
 impl LogicalPlaner {
     pub fn plan_select(&self, mut stmt: Box<BoundSelect>) -> Result<PlanRef, LogicalPlanError> {
         let mut plan: PlanRef;
-        let mut is_sorted = false;
+        let mut is_sorted = false; // 输入是否已经有序
         let mut with_row_handler = false;
-
+        info!("stmt: {:?}", stmt);
         if let Some(table_ref) = &stmt.from_table {
             // use `sorted` mode from the storage engine if the order by column is the primary key
-            if stmt.orderby.len() == 1 && !stmt.orderby[0].descending {
-                if let BoundExpr::ColumnRef(col_ref) = &stmt.orderby[0].expr {
+            if stmt.orderby.len() == 1 && !stmt.orderby[0].descending { // order by a; 只有一个排序字段
+                if let BoundExpr::ColumnRef(col_ref) = &stmt.orderby[0].expr { // 按照主键排序
                     if col_ref.is_primary_key {
                         is_sorted = true;
                     }
@@ -40,7 +41,11 @@ impl LogicalPlaner {
                 join_tables,
             } = table_ref
             {
+                // select * from t1 => relation: BaseTableRef { ref_id: 0.0.0, table_name: "t1", column_ids: [0, 1, 2], column_descs: [ColumnDesc { datatype: Int(None) (null), name: "a", is_primary: false }, ColumnDesc { datatype: Int(None) (null), name: "b", is_primary: false }, ColumnDesc { datatype: Int(None) (null), name: "c", is_primary: false }], is_internal: false }, join_tables: []
+                // select a from t1 => relation: BaseTableRef { ref_id: 0.0.0, table_name: "t1", column_ids: [0], column_descs: [ColumnDesc { datatype: Int(None) (null), name: "a", is_primary: false }], is_internal: false }, join_tables: []
+                info!("relation: {:?}, join_tables: {:?}", relation, join_tables);
                 if let BoundTableRef::BaseTableRef { column_ids, .. } = &**relation {
+                    info!("column_ids: {:?}", column_ids);
                     if join_tables.is_empty() && column_ids.is_empty() {
                         stmt.select_list.iter().for_each(|expr| {
                             if expr.contains_row_count() && !expr.contains_column_ref() {
@@ -51,7 +56,7 @@ impl LogicalPlaner {
                 }
             }
             plan = self.plan_table_ref(table_ref, with_row_handler, is_sorted)?;
-        } else {
+        } else { // 没有 from。
             plan = Arc::new(LogicalValues::new(
                 stmt.select_list
                     .iter()
@@ -109,7 +114,7 @@ impl LogicalPlaner {
                 stmt.select_list.push(node.expr.clone());
             }
         }
-
+        // select 中出现的 column 必须都出现在 group by 中
         if !stmt.group_by.is_empty() || agg_extractor.has_aggregate() || stmt.having.is_some() {
             agg_extractor.validate_illegal_column(&stmt.select_list, &stmt.orderby)?;
 
@@ -127,7 +132,7 @@ impl LogicalPlaner {
                 plan,
             ));
         }
-
+        // LogicalFilter 包裹了 LogicalAggregate， LogicalAggregate 再包裹了 PlanTableRef，一层层。
         if stmt.having.is_some() {
             plan = Arc::new(LogicalFilter::new(stmt.having.unwrap(), plan));
         }
@@ -143,7 +148,7 @@ impl LogicalPlaner {
             plan = Arc::new(LogicalProjection::new(stmt.select_list, plan));
             project = Some(plan.clone());
         }
-        if !comparators.is_empty() && !is_sorted {
+        if !comparators.is_empty() && !is_sorted { // 输入不是有序的，所以要再做一次排序
             plan = Arc::new(LogicalOrder::new(comparators, plan));
         }
         if stmt.limit.is_some() || stmt.offset.is_some() {
@@ -164,12 +169,13 @@ impl LogicalPlaner {
             plan = Arc::new(LogicalLimit::new(offset, limit, plan));
         }
 
+        info!("plan: {:?}", plan);
         // If the project expressions have changed due to order by
         // For example,
         // In SQL: `select a from t order by b;`
         // We need to add a new projection operator above the order by
         // To ensure that the final output is correct
-        if need_addtional_projection {
+        if need_addtional_projection { // 防止输出多的 column，把 order by 用到而没有在 select 出现的列去掉。
             let project = project.unwrap();
             let projection = project.as_logical_projection().unwrap();
             let mut projection_list = Vec::with_capacity(column_count);
@@ -177,6 +183,7 @@ impl LogicalPlaner {
             for item in project_expressions.iter().take(column_count) {
                 projection_list.push(item.clone());
             }
+            info!("projection_list: {:?}", projection_list);
             plan = Arc::new(LogicalProjection::new(projection_list, plan));
         }
         Ok(plan)
@@ -299,12 +306,13 @@ impl AggExtractor {
     fn visit_select_expr(&mut self, expr: &mut BoundExpr) {
         struct Visitor<'a>(&'a mut Vec<BoundAggCall>);
         impl<'a> ExprVisitor for Visitor<'a> {
+            // Visitor 覆盖了 visit_agg_call 方法，所以对于 expr 是 AggCall 的输入，都会加到 vec 里。
             fn visit_agg_call(&mut self, agg: &BoundAggCall) {
                 self.0.push(agg.clone());
             }
         }
         let mut agg_calls = vec![];
-        Visitor(&mut agg_calls).visit_expr(expr);
+        Visitor(&mut agg_calls).visit_expr(expr); // Vistor 将 expr 中的 AggCall 类型加到 agg_calls vec 里
         self.agg_calls.extend_from_slice(&agg_calls);
     }
 
