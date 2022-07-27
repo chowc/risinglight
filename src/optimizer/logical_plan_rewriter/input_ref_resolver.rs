@@ -75,6 +75,8 @@ impl ExprRewriter for InputRefResolver {
     }
 }
 
+// PlanRewrite 通过宏 rewrite 递归调用到子 PlanRef node 的 rewrite_xxx 方法，再调到 InputRefResolver 的 rewrite_template。先 PlanNode，再 Expr。
+// 最后调到 ExprRewriter.rewrite_expr 默认实现。
 impl PlanRewriter for InputRefResolver {
     fn rewrite_logical_join(&mut self, join: &LogicalJoin) -> PlanRef {
         let left = self.rewrite(join.left());
