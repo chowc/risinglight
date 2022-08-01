@@ -1,5 +1,7 @@
 // Copyright 2022 RisingLight Project Authors. Licensed under Apache-2.0.
 
+use tracing::info;
+
 use super::*;
 use crate::binder::*;
 use crate::catalog::ColumnRefId;
@@ -17,6 +19,7 @@ pub struct InputRefResolver {
     bindings: Vec<Option<BoundExpr>>,
 }
 
+// 将 sql 中引用的列转换为 catalog 中列对应的 index。
 impl InputRefResolver {
     fn rewrite_template(&self, expr: &mut BoundExpr) {
         use BoundExpr::*;
@@ -28,6 +31,9 @@ impl InputRefResolver {
             .iter()
             .position(|col| *col == Some(expr.clone()))
         {
+            info!("idx: {:?}", idx);
+            info!("expr: {:?}", expr);
+            // ColumnRef 转成了 InputRef。expr 还是一个 BoundExpr，通过节点的转换，完成了 Plan 的 rewrite。
             *expr = InputRef(BoundInputRef {
                 index: idx,
                 return_type: expr.return_type().unwrap(),
