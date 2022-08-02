@@ -26,6 +26,7 @@ use crate::for_all_plan_nodes;
 macro_rules! def_rewriter {
   ([], $($node:ident),*) => {
 
+    /// 每一个 PlanRewriter 都是对一棵 Plan 树的 rewrite。
     /// it's kind of like a [`PlanVisitor<PlanRef>`](super::PlanVisitor), but with default behaviour of each rewrite method
     pub trait PlanRewriter {
     paste! {

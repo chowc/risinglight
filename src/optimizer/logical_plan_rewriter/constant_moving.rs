@@ -19,8 +19,10 @@ pub struct ConstantMovingRule;
 impl ExprRewriter for ConstantMovingRule {
     fn rewrite_binary_op(&self, expr: &mut BoundExpr) {
         let new = match expr {
+            // 100 + a > 300 的 >，right_expr=300
             BinaryOp(op) => match (&op.op, &*op.left_expr, &*op.right_expr) {
                 (Eq | NotEq | Gt | Lt | GtEq | LtEq, BinaryOp(bin_op), Constant(rval)) => {
+                    // 100 + a > 300 的 +，left_expr=100
                     match (&bin_op.op, &*bin_op.left_expr, &*bin_op.right_expr) {
                         (Plus, other, Constant(lval)) | (Plus, Constant(lval), other) => {
                             BinaryOp(BoundBinaryOp {

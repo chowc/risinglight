@@ -8,6 +8,7 @@ use crate::binder::BoundExpr;
 
 /// Constant folding rule aims to evalute the constant expression before query execution.
 ///
+/// 直接将 constant 间的计算转换为计算的结果。
 /// For example,
 /// `select 3 * 2 * a from t where a >= 100 * 30;`
 /// The rule will convert it into
