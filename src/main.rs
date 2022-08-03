@@ -315,7 +315,7 @@ async fn main() -> Result<()> {
 
     let fmt_layer = tracing_subscriber::fmt::layer().compact();
     let filter_layer =
-        tracing_subscriber::EnvFilter::from_default_env().add_directive(Level::INFO.into());
+        tracing_subscriber::EnvFilter::from_default_env().add_directive(Level::DEBUG.into());
 
     tracing_subscriber::registry()
         .with(filter_layer)

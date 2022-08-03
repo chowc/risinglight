@@ -24,6 +24,7 @@ pub fn conjunctions(expr: BoundExpr) -> Vec<BoundExpr> {
     rets
 }
 
+// 加一个 True Constant 作为 left expr，然后进行 BoolExprSimplify
 pub fn merge_conjunctions<I>(iter: I) -> BoundExpr
 where
     I: Iterator<Item = BoundExpr>,

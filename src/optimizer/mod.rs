@@ -1,6 +1,7 @@
 // Copyright 2022 RisingLight Project Authors. Licensed under Apache-2.0.
 
 use bit_set::BitSet;
+use tracing::debug;
 
 use crate::binder::*;
 
@@ -49,7 +50,10 @@ impl Optimizer {
         let hep_optimizer = HeuristicOptimizer { rules };
         plan = hep_optimizer.optimize(plan);
         let out_types_num = plan.out_types().len();
+        // 加多一个 PlanProject 过滤不需要输出的 column
+        debug!("before prune_col {:#?}", plan);
         plan = plan.prune_col(BitSet::from_iter(0..out_types_num));
+        debug!("after prune_col {:#?}", plan);
         let mut phy_converter = PhysicalConverter;
         phy_converter.rewrite(plan)
     }

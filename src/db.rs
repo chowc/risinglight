@@ -181,19 +181,20 @@ impl Database {
         // TODO: parallelize
         let mut outputs: Vec<Chunk> = vec![];
         for stmt in stmts {
-            debug!("{:#?}", stmt);
-            // sql 中的表名、列名等绑定到 catalog 中的 table、column。
+            debug!("stmt {:#?}", stmt);
+            // sql 中的表名、列名等绑定到 catalog 中的 table、column。例如：表名 t1 转成 BaseTableRef，列名 a 转成 ColumnRef
             let stmt = binder.bind(&stmt)?;
-            debug!("{:#?}", stmt);
+            debug!("stmt after bind {:#?}", stmt);
             let logical_plan = logical_planner.plan(stmt)?;
-            debug!("{:#?}", logical_plan);
+            debug!("logical_plan {:#?}", logical_plan);
             // Resolve input reference
             let mut input_ref_resolver = InputRefResolver::default();
+            // ColumnRef(0.0.0) 转成 InputRef(#0)
             let logical_plan = input_ref_resolver.rewrite(logical_plan);
             let column_names = logical_plan.out_names();
-            debug!("{:#?}", logical_plan);
+            debug!("logical_plan after rewrite {:#?}", logical_plan);
             let optimized_plan = optimizer.optimize(logical_plan);
-            debug!("{:#?}", optimized_plan);
+            debug!("optimized_plan {:#?}", optimized_plan);
 
             let mut executor_builder = ExecutorBuilder::new(context.clone(), self.storage.clone());
             let executor = executor_builder.build(optimized_plan);

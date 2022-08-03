@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use tracing::debug;
+
 use super::*;
 use crate::binder::{BoundExpr, BoundJoinOperator};
 use crate::optimizer::expr_utils::{merge_conjunctions, shift_input_col_refs};
@@ -14,6 +16,7 @@ use crate::types::{DataTypeExt, DataTypeKind};
 
 pub struct FilterJoinRule {}
 
+// FilterCond 下推到 TableScan
 impl Rule for FilterJoinRule {
     fn apply(&self, plan: PlanRef) -> Result<PlanRef, ()> {
         let filter = plan.as_logical_filter()?;
@@ -40,12 +43,16 @@ impl Rule for FilterJoinRule {
                 join.left(),
             ))
         };
+        debug!("inner_join_predicat {:#?}", inner_join_predicate);
         let right = if inner_join_predicate.right_conds().is_empty() {
             join.right()
         } else {
+            debug!("right_cond before merge_conjunctions {:#?}", inner_join_predicate.right_conds().iter().cloned());
             let mut right_cond =
                 merge_conjunctions(inner_join_predicate.right_conds().iter().cloned());
-            shift_input_col_refs(&mut right_cond, -(left_col_num as i32));
+            debug!("right_cond after merge_conjunctions {:#?}", right_cond);
+            shift_input_col_refs(&mut right_cond, -(left_col_num as i32)); // 把左边的 FilterCond 移到了左边的 TableScan 下，右边的 InputRef 就得向左移动。
+            debug!("right_cond after shift_input_col_refs {:#?}", right_cond);
             Arc::new(LogicalFilter::new(right_cond, join.right()))
         };
 
@@ -60,6 +67,7 @@ impl Rule for FilterJoinRule {
                     .chain(inner_join_predicate.other_conds().iter().cloned()),
             ),
         ));
+        debug!("new_join {:#?}", new_join);
         Ok(new_join)
     }
 }
