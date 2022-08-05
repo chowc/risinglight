@@ -149,12 +149,14 @@ impl<S: Storage> TableScanExecutor<S> {
 
         let context = self.context.clone();
         match context.spawn(|token| async {
+            // 读数据，发到 tx
             let result = self.execute_inner(tx, token).await;
             if let Err(ExecutorError::Abort) = result {
                 warn!("Abort!")
             }
             result
         }) {
+            // 从 rx 接收数据
             Some(handler) => {
                 while let Some(item) = rx.recv().await {
                     yield item;

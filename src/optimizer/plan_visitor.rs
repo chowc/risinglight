@@ -14,6 +14,7 @@ macro_rules! def_visitor {
       fn visit(&mut self, plan: PlanRef) -> Option<R>{
         match plan.node_type() {
         $(
+          // 对类型 PlanA，它的 visit 方法会调用 visit_plan_a 方法。
           crate::optimizer::plan_nodes::PlanNodeType::$node => self.[<visit_ $node:snake>](plan.downcast_ref::<$node>().unwrap()),
         )*
         }

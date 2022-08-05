@@ -1,5 +1,7 @@
 // Copyright 2022 RisingLight Project Authors. Licensed under Apache-2.0.
 
+use tracing::debug;
+
 use super::super::plan_nodes::*;
 use super::*;
 use crate::binder::BoundJoinOperator;
@@ -8,6 +10,7 @@ use crate::optimizer::expr_utils::merge_conjunctions;
 pub struct PhysicalConverter;
 
 impl PlanRewriter for PhysicalConverter {
+    // 这里还没有考虑走索引的情况。
     fn rewrite_logical_table_scan(&mut self, logical: &LogicalTableScan) -> PlanRef {
         Arc::new(PhysicalTableScan::new(logical.clone()))
     }
@@ -38,7 +41,8 @@ impl PlanRewriter for PhysicalConverter {
     fn rewrite_logical_join(&mut self, logical_join: &LogicalJoin) -> PlanRef {
         let left = self.rewrite(logical_join.left());
         let right = self.rewrite(logical_join.right());
-        let predicate = logical_join.predicate();
+        let predicate = logical_join.predicate(); // 无法下推的就成了 join predicate。
+        debug!("predicate {:#?}", predicate);
         // FIXME: Currently just Inner join use HashJoin
         if !predicate.eq_keys().is_empty() && logical_join.join_op() == BoundJoinOperator::Inner {
             // TODO: Currently hash join just use one column pair as hash index
@@ -124,12 +128,12 @@ impl PlanRewriter for PhysicalConverter {
     }
 
     fn rewrite_logical_aggregate(&mut self, logical: &LogicalAggregate) -> PlanRef {
-        if logical.group_keys().is_empty() {
+        if logical.group_keys().is_empty() { // select sum(*) from t1;
             Arc::new(PhysicalSimpleAgg::new(
                 logical.agg_calls().to_vec(),
                 self.rewrite(logical.child()),
             ))
-        } else {
+        } else { // select sum(*) from t1 group by a;
             let child = self.rewrite(logical.child());
             let logical = logical.clone_with_child(child);
             Arc::new(PhysicalHashAgg::new(logical))

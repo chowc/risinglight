@@ -340,7 +340,7 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
                 StorageImpl::SecondaryStorage(storage) => TableScanExecutor {
                     context: self.context.clone(),
                     plan: plan.clone(),
-                    expr: plan.logical().expr().cloned(),
+                    expr: plan.logical().expr().cloned(), // 如果是 SecondaryStorage，在 scan data 的时候同时应用 filter 条件，过滤数据。
                     storage: storage.clone(),
                 }
                 .execute()
@@ -362,6 +362,7 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
     }
 
     fn visit_physical_filter(&mut self, plan: &PhysicalFilter) -> Option<BoxedExecutor> {
+        // 先执行 child (visit)，
         Some(ExecutorBuilder::trace_execute(
             FilterExecutor {
                 expr: plan.logical().expr().clone(),

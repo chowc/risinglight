@@ -1,5 +1,7 @@
 // Copyright 2022 RisingLight Project Authors. Licensed under Apache-2.0.
 
+use tracing::debug;
+
 use super::*;
 use crate::array::DataChunk;
 use crate::binder::BoundExpr;
@@ -11,10 +13,12 @@ pub struct ProjectionExecutor {
 }
 
 impl ProjectionExecutor {
+    // 只输出需要的列
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
     pub async fn execute(self) {
         #[for_await]
         for batch in self.child {
+            debug!("ProjectionExecutor batch {:#?}", batch);
             let batch = batch?;
             let chunk: Vec<_> = self
                 .project_expressions
