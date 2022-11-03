@@ -197,6 +197,7 @@ impl Database {
             debug!("optimized_plan {:#?}", optimized_plan);
 
             let mut executor_builder = ExecutorBuilder::new(context.clone(), self.storage.clone());
+            // 执行计划的每个节点构造成 Executor，
             let executor = executor_builder.build(optimized_plan);
 
             let output = executor.try_collect().await?;

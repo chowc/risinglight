@@ -141,6 +141,7 @@ impl ExecutorBuilder {
     }
 
     pub fn build(&mut self, plan: PlanRef) -> BoxedExecutor {
+        // ExecutorBuilder 实现 PlanVisitor，调 visit 的时候开始运行执行计划
         self.visit(plan).unwrap()
     }
 
@@ -310,7 +311,9 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
         &mut self,
         plan: &PhysicalNestedLoopJoin,
     ) -> Option<BoxedExecutor> {
+        // 非阻塞执行左子树的计划
         let left_child = self.visit(plan.left()).unwrap();
+        // 非阻塞执行右子树的计划
         let right_child = self.visit(plan.right()).unwrap();
         Some(ExecutorBuilder::trace_execute(
             NestedLoopJoinExecutor {
