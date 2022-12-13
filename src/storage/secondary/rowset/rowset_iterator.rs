@@ -8,10 +8,10 @@ use smallvec::smallvec;
 use super::super::{ColumnIteratorImpl, ColumnSeekPosition, SecondaryIteratorImpl};
 use super::DiskRowset;
 use crate::array::{Array, ArrayImpl};
-use crate::binder::BoundExpr;
 use crate::storage::secondary::DeleteVector;
 use crate::storage::{PackedVec, StorageChunk, StorageColumnRef, StorageResult};
 use crate::types::DataValue;
+use crate::v1::binder::BoundExpr;
 
 /// When `expected_size` is not specified, we should limit the maximum size of the chunk.
 const ROWSET_MAX_OUTPUT: usize = 2048;
@@ -123,8 +123,12 @@ impl RowSetIterator {
         let mut fetch_size = {
             // We find the minimum fetch hints from the column iterators first
             let mut min = None;
+            let mut is_finished = true;
             for it in &self.column_iterators {
-                let hint = it.fetch_hint();
+                let (hint, finished) = it.fetch_hint();
+                if !finished {
+                    is_finished = false
+                }
                 if hint != 0 {
                     if min.is_none() {
                         min = Some(hint);
@@ -133,7 +137,18 @@ impl RowSetIterator {
                     }
                 }
             }
-            min.unwrap_or(ROWSET_MAX_OUTPUT)
+
+            if min.is_some() {
+                min.unwrap().min(ROWSET_MAX_OUTPUT)
+            } else {
+                // Fast return: when all columns size is `0`, only has tow case:
+                // 1. index of current block is no data can fetch (use `ROWSET_MAX_OUTPUT`).
+                // 2. all columns is finished (return directly).
+                if is_finished {
+                    return Ok((true, None));
+                }
+                ROWSET_MAX_OUTPUT
+            }
         };
         if let Some(x) = expected_size {
             // Then, if `expected_size` is available, let `fetch_size`
@@ -389,16 +404,15 @@ impl SecondaryIteratorImpl for RowSetIterator {}
 mod tests {
     use itertools::Itertools;
     use sqlparser::ast::BinaryOperator;
-    pub use sqlparser::ast::DataType as DataTypeKind;
 
     use super::*;
     use crate::array::{Array, ArrayToVecExt};
-    use crate::binder::{BoundBinaryOp, BoundInputRef};
     use crate::storage::secondary::rowset::tests::{
         helper_build_rowset, helper_build_rowset_with_first_key_recorded,
     };
     use crate::storage::secondary::SecondaryRowHandler;
-    use crate::types::{DataType, DataValue, PhysicalDataTypeKind};
+    use crate::types::{DataTypeKind, DataValue};
+    use crate::v1::binder::{BoundBinaryOp, BoundInputRef};
 
     #[tokio::test]
     async fn test_rowset_iterator() {
@@ -470,25 +484,16 @@ mod tests {
 
         let left_expr = Box::new(BoundExpr::InputRef(BoundInputRef {
             index: 2,
-            return_type: DataType {
-                kind: DataTypeKind::Int(None),
-                physical_kind: PhysicalDataTypeKind::Int32,
-                nullable: true,
-            },
+            return_type: DataTypeKind::Int32.nullable(),
         }));
 
         let right_expr = Box::new(BoundExpr::Constant(DataValue::Int32(2)));
 
-        let return_type = Some(DataType {
-            kind: DataTypeKind::Boolean,
-            physical_kind: PhysicalDataTypeKind::Bool,
-            nullable: true,
-        });
         let expr = BoundExpr::BinaryOp(BoundBinaryOp {
             op,
             left_expr,
             right_expr,
-            return_type,
+            return_type: DataTypeKind::Bool.nullable(),
         });
         let mut it = rowset
             .iter(
@@ -616,7 +621,7 @@ mod tests {
             let mut column1_left = vec![];
             let mut column2_left = vec![];
             loop {
-                let chunk = it.next_batch(None).await.unwrap();
+                let chunk = it.next_batch(Some(280)).await.unwrap();
                 if chunk.is_none() {
                     break;
                 }
@@ -661,7 +666,7 @@ mod tests {
             let mut column1_left = vec![];
             let mut column2_left = vec![];
             loop {
-                let chunk = it.next_batch(None).await.unwrap();
+                let chunk = it.next_batch(Some(280)).await.unwrap();
                 if chunk.is_none() {
                     break;
                 }
@@ -706,7 +711,7 @@ mod tests {
             let mut column1_left = vec![];
             let mut column2_left = vec![];
             loop {
-                let chunk = it.next_batch(None).await.unwrap();
+                let chunk = it.next_batch(Some(280)).await.unwrap();
                 if chunk.is_none() {
                     break;
                 }
@@ -751,7 +756,7 @@ mod tests {
             let mut column1_left = vec![];
             let mut column2_left = vec![];
             loop {
-                let chunk = it.next_batch(None).await.unwrap();
+                let chunk = it.next_batch(Some(280)).await.unwrap();
                 if chunk.is_none() {
                     break;
                 }
@@ -796,7 +801,7 @@ mod tests {
             let mut column1_left = vec![];
             let mut column2_left = vec![];
             loop {
-                let chunk = it.next_batch(None).await.unwrap();
+                let chunk = it.next_batch(Some(280)).await.unwrap();
                 if chunk.is_none() {
                     break;
                 }

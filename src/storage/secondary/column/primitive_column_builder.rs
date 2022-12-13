@@ -8,24 +8,37 @@ use rust_decimal::Decimal;
 
 use super::super::{
     BlockBuilder, BlockIndexBuilder, ColumnBuilderOptions, PlainPrimitiveBlockBuilder,
-    PlainPrimitiveNullableBlockBuilder, PrimitiveFixedWidthEncode,
+    PrimitiveFixedWidthEncode,
 };
 use super::ColumnBuilder;
 use crate::array::Array;
-use crate::storage::secondary::block::RleBlockBuilder;
-use crate::types::{Date, Interval};
+use crate::storage::secondary::block::{DictBlockBuilder, NullableBlockBuilder, RleBlockBuilder};
+use crate::storage::secondary::EncodeType;
+use crate::types::{Date, Interval, F64};
 
 /// All supported block builders for primitive types.
 pub(super) enum BlockBuilderImpl<T: PrimitiveFixedWidthEncode> {
     Plain(PlainPrimitiveBlockBuilder<T>),
-    PlainNullable(PlainPrimitiveNullableBlockBuilder<T>),
+    PlainNullable(NullableBlockBuilder<T::ArrayType, PlainPrimitiveBlockBuilder<T>>),
     RunLength(RleBlockBuilder<T::ArrayType, PlainPrimitiveBlockBuilder<T>>),
-    RleNullable(RleBlockBuilder<T::ArrayType, PlainPrimitiveNullableBlockBuilder<T>>),
+    RleNullable(
+        RleBlockBuilder<
+            T::ArrayType,
+            NullableBlockBuilder<T::ArrayType, PlainPrimitiveBlockBuilder<T>>,
+        >,
+    ),
+    Dictionary(DictBlockBuilder<T::ArrayType, PlainPrimitiveBlockBuilder<T>>),
+    DictNullable(
+        DictBlockBuilder<
+            T::ArrayType,
+            NullableBlockBuilder<T::ArrayType, PlainPrimitiveBlockBuilder<T>>,
+        >,
+    ),
 }
 
 pub type I32ColumnBuilder = PrimitiveColumnBuilder<i32>;
 pub type I64ColumnBuilder = PrimitiveColumnBuilder<i64>;
-pub type F64ColumnBuilder = PrimitiveColumnBuilder<f64>;
+pub type F64ColumnBuilder = PrimitiveColumnBuilder<F64>;
 pub type BoolColumnBuilder = PrimitiveColumnBuilder<bool>;
 pub type DecimalColumnBuilder = PrimitiveColumnBuilder<Decimal>;
 pub type DateColumnBuilder = PrimitiveColumnBuilder<Date>;
@@ -86,6 +99,16 @@ impl<T: PrimitiveFixedWidthEncode> PrimitiveColumnBuilder<T> {
                 builder.get_statistics(),
                 builder.finish(),
             ),
+            BlockBuilderImpl::Dictionary(builder) => (
+                BlockType::Dictionary,
+                builder.get_statistics(),
+                builder.finish(),
+            ),
+            BlockBuilderImpl::DictNullable(builder) => (
+                BlockType::DictNullable,
+                builder.get_statistics(),
+                builder.finish(),
+            ),
         };
 
         self.block_index_builder.finish_block(
@@ -132,27 +155,43 @@ impl<T: PrimitiveFixedWidthEncode> ColumnBuilder<T::ArrayType> for PrimitiveColu
         let mut iter = array.iter().peekable();
         while iter.peek().is_some() {
             if self.current_builder.is_none() {
-                match (self.nullable, self.options.is_rle) {
-                    (true, true) => {
-                        let builder = PlainPrimitiveNullableBlockBuilder::new(
+                match (self.nullable, self.options.encode_type) {
+                    (true, EncodeType::RunLength) => {
+                        let builder = NullableBlockBuilder::new(
+                            PlainPrimitiveBlockBuilder::new(self.options.target_block_size - 16),
                             self.options.target_block_size - 16,
                         );
                         self.current_builder =
                             Some(BlockBuilderImpl::RleNullable(RleBlockBuilder::<
                                 T::ArrayType,
-                                PlainPrimitiveNullableBlockBuilder<T>,
+                                NullableBlockBuilder<T::ArrayType, PlainPrimitiveBlockBuilder<T>>,
                             >::new(
                                 builder
                             )));
                     }
-                    (true, false) => {
-                        self.current_builder = Some(BlockBuilderImpl::PlainNullable(
-                            PlainPrimitiveNullableBlockBuilder::new(
+                    (true, EncodeType::Plain) => {
+                        self.current_builder =
+                            Some(BlockBuilderImpl::PlainNullable(NullableBlockBuilder::new(
+                                PlainPrimitiveBlockBuilder::new(
+                                    self.options.target_block_size - 16,
+                                ),
                                 self.options.target_block_size - 16,
-                            ),
-                        ));
+                            )));
                     }
-                    (false, true) => {
+                    (true, EncodeType::Dictionary) => {
+                        let builder = NullableBlockBuilder::new(
+                            PlainPrimitiveBlockBuilder::new(self.options.target_block_size - 16),
+                            self.options.target_block_size - 16,
+                        );
+                        self.current_builder =
+                            Some(BlockBuilderImpl::DictNullable(DictBlockBuilder::<
+                                T::ArrayType,
+                                NullableBlockBuilder<T::ArrayType, PlainPrimitiveBlockBuilder<T>>,
+                            >::new(
+                                builder
+                            )));
+                    }
+                    (false, EncodeType::RunLength) => {
                         let builder =
                             PlainPrimitiveBlockBuilder::new(self.options.target_block_size - 16);
                         self.current_builder =
@@ -163,10 +202,21 @@ impl<T: PrimitiveFixedWidthEncode> ColumnBuilder<T::ArrayType> for PrimitiveColu
                                 builder
                             )));
                     }
-                    (false, false) => {
+                    (false, EncodeType::Plain) => {
                         self.current_builder = Some(BlockBuilderImpl::Plain(
                             PlainPrimitiveBlockBuilder::new(self.options.target_block_size - 16),
                         ));
+                    }
+                    (false, EncodeType::Dictionary) => {
+                        let builder =
+                            PlainPrimitiveBlockBuilder::new(self.options.target_block_size - 16);
+                        self.current_builder =
+                            Some(BlockBuilderImpl::Dictionary(DictBlockBuilder::<
+                                T::ArrayType,
+                                PlainPrimitiveBlockBuilder<T>,
+                            >::new(
+                                builder
+                            )));
                     }
                 }
 
@@ -186,6 +236,8 @@ impl<T: PrimitiveFixedWidthEncode> ColumnBuilder<T::ArrayType> for PrimitiveColu
                 BlockBuilderImpl::PlainNullable(builder) => append_one_by_one(&mut iter, builder),
                 BlockBuilderImpl::RunLength(builder) => append_one_by_one(&mut iter, builder),
                 BlockBuilderImpl::RleNullable(builder) => append_one_by_one(&mut iter, builder),
+                BlockBuilderImpl::Dictionary(builder) => append_one_by_one(&mut iter, builder),
+                BlockBuilderImpl::DictNullable(builder) => append_one_by_one(&mut iter, builder),
             };
 
             self.block_index_builder.add_rows(row_count);

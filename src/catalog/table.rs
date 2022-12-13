@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, HashMap};
 
 use super::*;
-use crate::types::{ColumnId, TableId};
 
 /// The catalog of a table.
 pub struct TableCatalog {
@@ -37,6 +36,12 @@ impl TableCatalog {
             next_column_id: 0,
             ordered_pk_ids,
         };
+        table_catalog
+            .add_column(ColumnCatalog::new(
+                u32::MAX,
+                DataTypeKind::Int64.not_null().to_column("_rowid_".into()),
+            ))
+            .unwrap();
         for col_catalog in columns {
             table_catalog.add_column(col_catalog).unwrap();
         }
@@ -67,6 +72,12 @@ impl TableCatalog {
     }
 
     pub fn all_columns(&self) -> BTreeMap<ColumnId, ColumnCatalog> {
+        let mut columns = self.columns.clone();
+        columns.remove(&u32::MAX); // remove rowid
+        columns
+    }
+
+    pub fn all_columns_with_rowid(&self) -> BTreeMap<ColumnId, ColumnCatalog> {
         self.columns.clone()
     }
 
@@ -104,8 +115,8 @@ mod tests {
 
     #[test]
     fn test_table_catalog() {
-        let col0 = ColumnCatalog::new(0, DataTypeKind::Int(None).not_null().to_column("a".into()));
-        let col1 = ColumnCatalog::new(1, DataTypeKind::Boolean.not_null().to_column("b".into()));
+        let col0 = ColumnCatalog::new(0, DataTypeKind::Int32.not_null().to_column("a".into()));
+        let col1 = ColumnCatalog::new(1, DataTypeKind::Bool.not_null().to_column("b".into()));
 
         let col_catalogs = vec![col0, col1];
         let table_catalog = TableCatalog::new(0, "t".into(), col_catalogs, false, vec![]);
@@ -119,10 +130,10 @@ mod tests {
 
         let col0_catalog = table_catalog.get_column_by_id(0).unwrap();
         assert_eq!(col0_catalog.name(), "a");
-        assert_eq!(col0_catalog.datatype().kind(), DataTypeKind::Int(None));
+        assert_eq!(col0_catalog.datatype().kind(), DataTypeKind::Int32);
 
         let col1_catalog = table_catalog.get_column_by_id(1).unwrap();
         assert_eq!(col1_catalog.name(), "b");
-        assert_eq!(col1_catalog.datatype().kind(), DataTypeKind::Boolean);
+        assert_eq!(col1_catalog.datatype().kind(), DataTypeKind::Bool);
     }
 }

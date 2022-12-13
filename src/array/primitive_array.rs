@@ -7,13 +7,13 @@ use bitvec::vec::BitVec;
 use serde::{Deserialize, Serialize};
 
 use super::{Array, ArrayBuilder, ArrayEstimateExt, ArrayFromDataExt, ArrayValidExt};
-use crate::types::NativeType;
+use crate::types::{NativeType, F32, F64};
 
 mod simd;
 pub use self::simd::*;
 
-/// A collection of primitive types, such as `i32`, `f32`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A collection of primitive types, such as `i32`, `F32`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PrimitiveArray<T: NativeType> {
     valid: BitVec,
     data: Vec<T>,
@@ -43,20 +43,46 @@ impl<T: NativeType> FromIterator<T> for PrimitiveArray<T> {
     }
 }
 
+impl FromIterator<f32> for PrimitiveArray<F32> {
+    fn from_iter<I: IntoIterator<Item = f32>>(iter: I) -> Self {
+        let data: Vec<F32> = iter.into_iter().map(F32::from).collect();
+        let size = data.len();
+        Self {
+            data,
+            valid: BitVec::repeat(true, size),
+        }
+    }
+}
+
+impl FromIterator<f64> for PrimitiveArray<F64> {
+    fn from_iter<I: IntoIterator<Item = f64>>(iter: I) -> Self {
+        let data: Vec<F64> = iter.into_iter().map(F64::from).collect();
+        let size = data.len();
+        Self {
+            data,
+            valid: BitVec::repeat(true, size),
+        }
+    }
+}
+
 impl<T: NativeType> Array for PrimitiveArray<T> {
     type Item = T;
     type Builder = PrimitiveArrayBuilder<T>;
-    type NonNullIterator<'a> = std::slice::Iter<'a, T>;
+    type RawIter<'a> = std::slice::Iter<'a, T>;
 
     fn get(&self, idx: usize) -> Option<&T> {
         self.valid[idx].then(|| &self.data[idx])
+    }
+
+    fn get_unchecked(&self, idx: usize) -> &T {
+        &self.data[idx]
     }
 
     fn len(&self) -> usize {
         self.valid.len()
     }
 
-    fn non_null_iter(&self) -> Self::NonNullIterator<'_> {
+    fn raw_iter(&self) -> Self::RawIter<'_> {
         self.data.iter()
     }
 }
@@ -74,7 +100,10 @@ impl<T: NativeType> ArrayEstimateExt for PrimitiveArray<T> {
 }
 
 impl<T: NativeType> ArrayFromDataExt for PrimitiveArray<T> {
-    fn from_data(data_iter: impl Iterator<Item = Self::Item> + TrustedLen, valid: BitVec) -> Self {
+    fn from_data(
+        data_iter: impl Iterator<Item = <Self::Item as ToOwned>::Owned> + TrustedLen,
+        valid: BitVec,
+    ) -> Self {
         let data = data_iter.collect();
         Self { valid, data }
     }
@@ -88,6 +117,18 @@ pub struct PrimitiveArrayBuilder<T: NativeType> {
 
 impl<T: NativeType> ArrayBuilder for PrimitiveArrayBuilder<T> {
     type Array = PrimitiveArray<T>;
+
+    fn extend_from_raw_data(&mut self, raw: &[<<Self::Array as Array>::Item as ToOwned>::Owned]) {
+        self.data.extend_from_slice(raw);
+    }
+
+    fn extend_from_nulls(&mut self, count: usize) {
+        self.data.extend((0..count).map(|_| T::default()));
+    }
+
+    fn replace_bitmap(&mut self, valid: BitVec) {
+        let _ = mem::replace(&mut self.valid, valid);
+    }
 
     fn with_capacity(capacity: usize) -> Self {
         Self {
@@ -125,6 +166,7 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
+    use crate::types::{F32, F64};
 
     fn test_builder<T: FromPrimitive + NativeType>() {
         let iter = (0..1000).map(|x| if x % 2 == 0 { None } else { T::from_usize(x) });
@@ -152,12 +194,12 @@ mod tests {
 
     #[test]
     fn test_builder_f32() {
-        test_builder::<f32>();
+        test_builder::<F32>();
     }
 
     #[test]
     fn test_builder_f64() {
-        test_builder::<f64>();
+        test_builder::<F64>();
     }
 
     #[test]

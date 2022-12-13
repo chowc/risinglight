@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use super::*;
-use crate::types::DatabaseId;
 
 /// The root of all catalogs.
 pub struct RootCatalog {
@@ -91,6 +90,11 @@ impl RootCatalog {
         let db = self.get_database_by_id(table_ref_id.database_id)?;
         let schema = db.get_schema_by_id(table_ref_id.schema_id)?;
         schema.get_table_by_id(table_ref_id.table_id)
+    }
+
+    pub fn get_column(&self, column_ref_id: &ColumnRefId) -> Option<ColumnCatalog> {
+        self.get_table(&column_ref_id.table())?
+            .get_column_by_id(column_ref_id.column_id)
     }
 
     pub fn add_table(

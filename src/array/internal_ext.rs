@@ -28,12 +28,15 @@ pub trait ArrayImplEstimateExt {
 }
 
 pub trait ArrayFromDataExt: Array {
-    fn from_data(data_iter: impl Iterator<Item = Self::Item> + TrustedLen, valid: BitVec) -> Self;
+    fn from_data(
+        data_iter: impl Iterator<Item = <Self::Item as ToOwned>::Owned> + TrustedLen,
+        valid: BitVec,
+    ) -> Self;
 }
 
 /// Implement dispatch functions for `ArrayImplValidExt` and `ArrayImplEstimateExt`
 macro_rules! impl_array_impl_internal_ext {
-    ([], $( { $Abc:ident, $abc:ident, $AbcArray:ty, $AbcArrayBuilder:ty, $Value:ident } ),*) => {
+    ([], $( { $Abc:ident, $Type:ty, $abc:ident, $AbcArray:ty, $AbcArrayBuilder:ty, $Value:ident, $Pattern:pat } ),*) => {
         impl ArrayImplValidExt for ArrayImpl {
             fn get_valid_bitmap(&self) -> &BitVec {
                 match self {

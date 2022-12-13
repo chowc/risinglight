@@ -87,7 +87,7 @@ pub fn decode_u32_slice(bytes: &[u8]) -> Result<(u32, usize), DecodeError> {
 /// Encodes fixed-width data into a block with run-length encoding. The layout is
 /// rle counts and data from other block builder
 /// ```plain
-/// | rle_counts_num (u32) | rle_block_length (u32) | rle_count(u32) | rle_count | data | data | (may be bit) |
+/// | rle_counts_num (u32) | rle_block_length (u32) | rle_count(variable) | rle_count | data | data | (may be bit) |
 /// ```
 pub struct RleBlockBuilder<A, B>
 where
@@ -179,6 +179,10 @@ where
         encoded_data.extend(data);
         encoded_data
     }
+
+    fn get_target_size(&self) -> usize {
+        self.block_builder.get_target_size()
+    }
 }
 
 #[cfg(test)]
@@ -186,8 +190,8 @@ mod tests {
     use itertools::Itertools;
 
     use super::super::{
-        PlainBlobBlockBuilder, PlainCharBlockBuilder, PlainPrimitiveBlockBuilder,
-        PlainPrimitiveNullableBlockBuilder,
+        NullableBlockBuilder, PlainBlobBlockBuilder, PlainCharBlockBuilder,
+        PlainPrimitiveBlockBuilder,
     };
     use super::*;
     use crate::array::{I32Array, Utf8Array};
@@ -216,9 +220,9 @@ mod tests {
     #[test]
     fn test_build_rle_primitive_nullable_i32() {
         // Test primitive nullable rle block builder for i32
-        let builder = PlainPrimitiveNullableBlockBuilder::new(48);
-        let mut rle_builder =
-            RleBlockBuilder::<I32Array, PlainPrimitiveNullableBlockBuilder<i32>>::new(builder);
+        let inner_builder = PlainPrimitiveBlockBuilder::<i32>::new(48);
+        let builder = NullableBlockBuilder::new(inner_builder, 48);
+        let mut rle_builder = RleBlockBuilder::new(builder);
         for item in [None].iter().cycle().cloned().take(30) {
             rle_builder.append(item);
         }
@@ -250,12 +254,10 @@ mod tests {
             .iter()
             .cycle()
             .cloned()
-            .take(u32::MAX as usize + 1)
+            .take(u16::MAX as usize + 1)
         {
             rle_builder.append(item);
         }
-        assert_eq!(rle_builder.estimated_size(), 11 * 4 + 2 + 11 * 2 + 4);
-        assert!(rle_builder.should_finish(&Some(&5)));
         rle_builder.finish();
     }
 

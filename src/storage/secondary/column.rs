@@ -37,7 +37,8 @@ use bytes::Bytes;
 pub use char_column_factory::*;
 use moka::future::Cache;
 
-use super::{Block, BlockCacheKey, BlockHeader, ColumnIndex, BLOCK_HEADER_SIZE};
+use super::block::BLOCK_META_CHECKSUM_SIZE;
+use super::{Block, BlockCacheKey, BlockMeta, ColumnIndex, BLOCK_META_SIZE};
 use crate::array::Array;
 use crate::storage::secondary::verify_checksum;
 use crate::storage::{StorageResult, TracedStorageError};
@@ -72,7 +73,8 @@ pub trait ColumnIterator<A: Array> {
 
     /// Number of items that can be fetched without I/O. When the column iterator has finished
     /// iterating, the returned value should be 0.
-    fn fetch_hint(&self) -> usize;
+    /// If return true, then current column is finished, otherwise has another data.
+    fn fetch_hint(&self) -> (usize, bool);
 
     /// Fetch the current row id in this column iterator
     fn fetch_current_row_id(&self) -> u32;
@@ -143,14 +145,14 @@ impl Column {
         lst_idx.offset + lst_idx.length
     }
 
-    pub async fn get_block(&self, block_id: u32) -> StorageResult<(BlockHeader, Block)> {
+    pub async fn get_block(&self, block_id: u32) -> StorageResult<(BlockMeta, Block)> {
         // It is possible that there will be multiple futures accessing
         // one block not in cache concurrently, which might cause avalanche
         // in cache. For now, we don't handle it.
 
         let key = self.base_block_key.clone().block(block_id);
 
-        let mut block_header = BlockHeader::default();
+        let mut block_header = BlockMeta::default();
         let mut do_verify_checksum = false;
 
         // support multiple I/O backend
@@ -170,7 +172,7 @@ impl Column {
                             ColumnReadableFile::NormalRead(file) => {
                                 let mut data = vec![0; info.length as usize];
                                 let mut file = file.lock().unwrap();
-                                file.seek(SeekFrom::Start(info.offset as u64))?;
+                                file.seek(SeekFrom::Start(info.offset))?;
                                 file.read_exact(&mut data[..])?;
                                 Bytes::from(data)
                             }
@@ -190,23 +192,22 @@ impl Column {
                 })
                 .await?;
 
-        if block.len() < BLOCK_HEADER_SIZE {
+        if block.len() < BLOCK_META_SIZE {
             return Err(TracedStorageError::decode(
                 "block is smaller than header size",
             ));
         }
-        let mut header = &block[..BLOCK_HEADER_SIZE];
-        let block_data = &block[BLOCK_HEADER_SIZE..];
+        let mut header = &block[block.len() - BLOCK_META_SIZE..];
         block_header.decode(&mut header)?;
 
         if do_verify_checksum {
             verify_checksum(
                 block_header.checksum_type,
-                block_data,
+                &block[..block.len() - BLOCK_META_CHECKSUM_SIZE],
                 block_header.checksum,
             )?;
         }
 
-        Ok((block_header, block.slice(BLOCK_HEADER_SIZE..)))
+        Ok((block_header, block.slice(..block.len() - BLOCK_META_SIZE)))
     }
 }

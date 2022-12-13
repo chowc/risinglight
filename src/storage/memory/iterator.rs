@@ -1,7 +1,6 @@
 // Copyright 2022 RisingLight Project Authors. Licensed under Apache-2.0.
 
 use std::collections::HashSet;
-use std::future::Future;
 use std::sync::Arc;
 
 use bitvec::prelude::BitVec;
@@ -52,19 +51,22 @@ impl InMemoryTxnIterator {
                 .map(|x| !self.deleted_rows.contains(&x))
                 .collect::<BitVec>();
 
-            let chunk = self
-                .col_idx
-                .iter()
-                .map(|idx| match idx {
-                    StorageColumnRef::Idx(idx) => selected_chunk
-                        .array_at(*idx as usize)
+            let chunk = if self.col_idx.is_empty() {
+                DataChunk::no_column(visibility.count_ones())
+            } else {
+                self.col_idx
+                    .iter()
+                    .map(|idx| match idx {
+                        StorageColumnRef::Idx(idx) => selected_chunk
+                            .array_at(*idx as usize)
+                            .filter(visibility.iter().map(|x| *x)),
+                        StorageColumnRef::RowHandler => ArrayImpl::new_int64(I64Array::from_iter(
+                            batch_range.clone().map(|x| x as i64),
+                        ))
                         .filter(visibility.iter().map(|x| *x)),
-                    StorageColumnRef::RowHandler => ArrayImpl::new_int64(I64Array::from_iter(
-                        batch_range.clone().map(|x| x as i64),
-                    ))
-                    .filter(visibility.iter().map(|x| *x)),
-                })
-                .collect::<DataChunk>();
+                    })
+                    .collect::<DataChunk>()
+            };
 
             self.cnt += 1;
             self.row_cnt += selected_chunk.cardinality();
@@ -75,9 +77,10 @@ impl InMemoryTxnIterator {
 }
 
 impl TxnIterator for InMemoryTxnIterator {
-    type NextFuture<'a> = impl Future<Output = StorageResult<Option<DataChunk>>> + 'a;
-
-    fn next_batch(&mut self, expected_size: Option<usize>) -> Self::NextFuture<'_> {
-        async move { self.next_batch_inner(expected_size).await }
+    async fn next_batch(
+        &mut self,
+        expected_size: Option<usize>,
+    ) -> StorageResult<Option<DataChunk>> {
+        self.next_batch_inner(expected_size).await
     }
 }

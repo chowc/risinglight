@@ -3,25 +3,24 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures::Future;
 use itertools::Itertools;
 use risinglight_proto::rowset::block_statistics::BlockStatisticsType;
 use risinglight_proto::rowset::DeleteRecord;
 use tokio::sync::OwnedMutexGuard;
 use tracing::{info, warn};
 
-use super::version_manager::{Snapshot, VersionManager};
+use super::version_manager::{Snapshot, Version, VersionManager};
 use super::{
     AddDVEntry, AddRowSetEntry, ColumnBuilderOptions, ConcatIterator, DeleteVector, DiskRowset,
     EpochOp, MergeIterator, RowSetIterator, SecondaryMemRowsetImpl, SecondaryRowHandler,
     SecondaryTable, SecondaryTableTxnIterator,
 };
 use crate::array::DataChunk;
-use crate::binder::BoundExpr;
 use crate::catalog::find_sort_key_id;
 use crate::storage::secondary::statistics::create_statistics_global_aggregator;
 use crate::storage::{StorageColumnRef, StorageResult, Transaction};
 use crate::types::DataValue;
+use crate::v1::binder::BoundExpr;
 
 /// A transaction running on `SecondaryStorage`.
 pub struct SecondaryTransaction {
@@ -45,9 +44,6 @@ pub struct SecondaryTransaction {
     /// Snapshot content
     snapshot: Arc<Snapshot>,
 
-    /// Epoch of the snapshot
-    epoch: u64,
-
     /// The rowsets produced in the txn.
     to_be_committed_rowsets: Vec<DiskRowset>,
 
@@ -59,6 +55,9 @@ pub struct SecondaryTransaction {
     ///
     /// TODO: we only calculate batch insert here. Need to estimate delete vector size.
     total_size: usize,
+
+    /// Reference version.
+    _pin_version: Arc<Version>,
 }
 
 impl SecondaryTransaction {
@@ -70,16 +69,14 @@ impl SecondaryTransaction {
         update: bool,
     ) -> StorageResult<Self> {
         // pin a snapshot at version manager
-        let (epoch, snapshot) = table.version.pin();
-
+        let pin_version = table.version.pin();
         Ok(Self {
             finished: false,
             mem: None,
             delete_buffer: vec![],
             table: table.clone(),
             version: table.version.clone(),
-            epoch,
-            snapshot,
+            snapshot: pin_version.snapshot.clone(),
             delete_lock: if update {
                 Some(table.lock_for_deletion().await)
             } else {
@@ -88,6 +85,7 @@ impl SecondaryTransaction {
             to_be_committed_rowsets: vec![],
             read_only,
             total_size: 0,
+            _pin_version: pin_version,
         })
     }
 
@@ -214,7 +212,6 @@ impl SecondaryTransaction {
         self.version.commit_changes(changeset).await?;
 
         self.finished = true;
-        self.version.unpin(self.epoch);
 
         Ok(())
     }
@@ -331,7 +328,7 @@ impl SecondaryTransaction {
 
             self.mem = Some(SecondaryMemRowsetImpl::new(
                 self.table.columns.clone(),
-                ColumnBuilderOptions::from_storage_options(&*self.table.storage_options),
+                ColumnBuilderOptions::from_storage_options(&self.table.storage_options),
                 rowset_id,
             ));
         }
@@ -354,72 +351,45 @@ impl Transaction for SecondaryTransaction {
 
     type RowHandlerType = SecondaryRowHandler;
 
-    type ScanResultFuture<'a> =
-        impl Future<Output = StorageResult<Self::TxnIteratorType>> + Send + 'a;
-
-    type AppendResultFuture<'a> = impl Future<Output = StorageResult<()>> + Send + 'a;
-
-    type DeleteResultFuture<'a> = impl Future<Output = StorageResult<()>> + Send + 'a;
-
-    type CommitResultFuture<'a> = impl Future<Output = StorageResult<()>> + Send + 'a;
-
-    type AbortResultFuture<'a> = impl Future<Output = StorageResult<()>> + Send + 'a;
-
-    fn scan<'a>(
-        &'a self,
-        begin_sort_key: &'a [DataValue],
-        end_sort_key: &'a [DataValue],
-        col_idx: &'a [StorageColumnRef],
+    async fn scan(
+        &self,
+        begin_sort_key: &[DataValue],
+        end_sort_key: &[DataValue],
+        col_idx: &[StorageColumnRef],
         is_sorted: bool,
         reversed: bool,
         expr: Option<BoundExpr>,
-    ) -> Self::ScanResultFuture<'a> {
-        async move {
-            self.scan_inner(
-                begin_sort_key,
-                end_sort_key,
-                col_idx,
-                is_sorted,
-                reversed,
-                expr,
-            )
-            .await
-        }
+    ) -> StorageResult<SecondaryTableTxnIterator> {
+        self.scan_inner(
+            begin_sort_key,
+            end_sort_key,
+            col_idx,
+            is_sorted,
+            reversed,
+            expr,
+        )
+        .await
     }
 
-    fn append(&mut self, columns: DataChunk) -> Self::AppendResultFuture<'_> {
-        async move { self.append_inner(columns).await }
+    async fn append(&mut self, columns: DataChunk) -> StorageResult<()> {
+        self.append_inner(columns).await
     }
 
-    fn delete<'a>(&'a mut self, id: &'a Self::RowHandlerType) -> Self::DeleteResultFuture<'a> {
-        async move {
-            assert!(
-                self.delete_lock.is_some(),
-                "delete lock is not held for this txn"
-            );
-            self.delete_buffer.push(*id);
-            Ok(())
-        }
+    async fn delete(&mut self, id: &Self::RowHandlerType) -> StorageResult<()> {
+        assert!(
+            self.delete_lock.is_some(),
+            "delete lock is not held for this txn"
+        );
+        self.delete_buffer.push(*id);
+        Ok(())
     }
 
-    fn commit<'a>(self) -> Self::CommitResultFuture<'a> {
-        async move { self.commit_inner().await }
+    async fn commit(self) -> StorageResult<()> {
+        self.commit_inner().await
     }
 
-    fn abort<'a>(mut self) -> Self::AbortResultFuture<'a> {
-        async move {
-            self.finished = true;
-            self.version.unpin(self.epoch);
-            Ok(())
-        }
-    }
-}
-
-impl Drop for SecondaryTransaction {
-    fn drop(&mut self) {
-        if !self.finished {
-            warn!("Transaction dropped without committing or aborting");
-            self.version.unpin(self.epoch);
-        }
+    async fn abort(mut self) -> StorageResult<()> {
+        self.finished = true;
+        Ok(())
     }
 }

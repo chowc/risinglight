@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::*;
-use crate::types::{DatabaseId, SchemaId};
 
 /// The catalog of a database.
 #[derive(Clone)]
@@ -88,7 +87,7 @@ impl DatabaseCatalog {
                 "contributors".to_string(),
                 vec![ColumnCatalog::new(
                     0,
-                    DataTypeKind::Char(None)
+                    DataTypeKind::String
                         .not_null()
                         .to_column("github_id".into()),
                 )],

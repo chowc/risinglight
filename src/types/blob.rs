@@ -9,7 +9,7 @@ use ref_cast::RefCast;
 use serde::{Deserialize, Serialize};
 
 /// Binary large object.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Serialize, Deserialize, Default)]
 pub struct Blob(Vec<u8>);
 
 impl From<&[u8]> for Blob {
@@ -26,13 +26,13 @@ impl From<Vec<u8>> for Blob {
 
 impl Borrow<BlobRef> for Blob {
     fn borrow(&self) -> &BlobRef {
-        &*self
+        self
     }
 }
 
 impl AsRef<BlobRef> for Blob {
     fn as_ref(&self) -> &BlobRef {
-        &*self
+        self
     }
 }
 
@@ -44,12 +44,20 @@ impl Deref for Blob {
     }
 }
 
+impl Blob {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// An error which can be returned when parsing a blob.
-#[derive(thiserror::Error, Debug, Clone, PartialEq)]
-#[error("parse blob error")]
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum ParseBlobError {
+    #[error("invalid hex: {0}")]
     Int(#[from] std::num::ParseIntError),
-    Length,
+    #[error("unexpected end of string")]
+    UnexpectedEof,
+    #[error("invalid character")]
     InvalidChar,
 }
 
@@ -61,7 +69,7 @@ impl FromStr for Blob {
         while !s.is_empty() {
             if let Some(ss) = s.strip_prefix("\\x") {
                 if ss.len() < 2 {
-                    return Err(ParseBlobError::Length);
+                    return Err(ParseBlobError::UnexpectedEof);
                 }
                 if !s.is_char_boundary(2) {
                     return Err(ParseBlobError::InvalidChar);
@@ -72,7 +80,7 @@ impl FromStr for Blob {
                 if !s.is_char_boundary(1) {
                     return Err(ParseBlobError::InvalidChar);
                 }
-                v.push(s.as_bytes()[0] as u8);
+                v.push(s.as_bytes()[0]);
                 s = &s[1..];
             }
         }
@@ -94,7 +102,7 @@ impl fmt::Display for Blob {
 
 /// A slice of a blob.
 #[repr(transparent)]
-#[derive(PartialEq, PartialOrd, RefCast)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, RefCast, Hash)]
 pub struct BlobRef([u8]);
 
 impl BlobRef {

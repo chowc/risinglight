@@ -1,5 +1,6 @@
 // Copyright 2022 RisingLight Project Authors. Licensed under Apache-2.0.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use futures::TryStreamExt;
@@ -9,42 +10,46 @@ use tracing::debug;
 use crate::array::{
     ArrayBuilder, ArrayBuilderImpl, Chunk, DataChunk, I32ArrayBuilder, Utf8ArrayBuilder,
 };
-use crate::binder::{BindError, Binder};
 use crate::catalog::RootCatalogRef;
-use crate::executor::context::Context;
-use crate::executor::{ExecutorBuilder, ExecutorError};
-use crate::logical_planner::{LogicalPlanError, LogicalPlaner};
-use crate::optimizer::logical_plan_rewriter::{InputRefResolver, PlanRewriter};
-use crate::optimizer::plan_nodes::PlanRef;
-use crate::optimizer::Optimizer;
 use crate::parser::{parse, ParserError};
 use crate::storage::{
     InMemoryStorage, SecondaryStorage, SecondaryStorageOptions, Storage, StorageColumnRef,
     StorageImpl, Table,
 };
+use crate::v1::binder::Binder;
+use crate::v1::executor::ExecutorBuilder;
+use crate::v1::logical_planner::LogicalPlaner;
+use crate::v1::optimizer::logical_plan_rewriter::{InputRefResolver, PlanRewriter};
+use crate::v1::optimizer::plan_nodes::PlanRef;
+use crate::v1::optimizer::Optimizer;
 
 /// The database instance.
 pub struct Database {
     catalog: RootCatalogRef,
     storage: StorageImpl,
+    use_v1: AtomicBool,
 }
 
 impl Database {
     /// Create a new in-memory database instance.
     pub fn new_in_memory() -> Self {
         let storage = InMemoryStorage::new();
-        let catalog = storage.catalog().clone();
-        let storage = StorageImpl::InMemoryStorage(Arc::new(storage));
-        Database { catalog, storage }
+        Database {
+            catalog: storage.catalog().clone(),
+            storage: StorageImpl::InMemoryStorage(Arc::new(storage)),
+            use_v1: AtomicBool::new(false),
+        }
     }
 
     /// Create a new database instance with merge-tree engine.
     pub async fn new_on_disk(options: SecondaryStorageOptions) -> Self {
         let storage = Arc::new(SecondaryStorage::open(options).await.unwrap());
         storage.spawn_compactor().await;
-        let catalog = storage.catalog().clone();
-        let storage = StorageImpl::SecondaryStorage(storage);
-        Database { catalog, storage }
+        Database {
+            catalog: storage.catalog().clone(),
+            storage: StorageImpl::SecondaryStorage(storage),
+            use_v1: AtomicBool::new(false),
+        }
     }
 
     pub async fn shutdown(&self) -> Result<(), Error> {
@@ -150,29 +155,49 @@ impl Database {
             }
         } else if cmd == "dt" {
             self.run_dt()
+        } else if cmd == "v1" || cmd == "v2" {
+            self.use_v1.store(cmd == "v1", Ordering::Relaxed);
+            println!("switched to query engine {cmd}");
+            Ok(vec![])
         } else {
             Err(Error::InternalError("unsupported command".to_string()))
         }
     }
 
     /// Run SQL queries and return the outputs.
-
     pub async fn run(&self, sql: &str) -> Result<Vec<Chunk>, Error> {
-        self.run_with_context(Default::default(), sql).await
-    }
-
-    pub async fn run_with_context(
-        &self,
-        context: Arc<Context>,
-        sql: &str,
-    ) -> Result<Vec<Chunk>, Error> {
         if let Some(cmdline) = sql.trim().strip_prefix('\\') {
             return self.run_internal(cmdline).await;
         }
+        if self.use_v1.load(Ordering::Relaxed) {
+            return self.run_v1(sql).await;
+        }
 
-        // parse
         let stmts = parse(sql)?;
+        let mut outputs: Vec<Chunk> = vec![];
+        for stmt in stmts {
+            let mut binder = crate::binder_v2::Binder::new(self.catalog.clone());
+            let bound = binder.bind(stmt)?;
+            let optimized = crate::planner::optimize(&bound);
+            let executor = match self.storage.clone() {
+                StorageImpl::InMemoryStorage(s) => {
+                    crate::executor_v2::build(self.catalog.clone(), s, &optimized)
+                }
+                StorageImpl::SecondaryStorage(s) => {
+                    crate::executor_v2::build(self.catalog.clone(), s, &optimized)
+                }
+            };
+            let output = executor.try_collect().await?;
+            let chunk = Chunk::new(output);
+            // TODO: set name
+            outputs.push(chunk);
+        }
+        Ok(outputs)
+    }
 
+    /// Run SQL queries using query engine v1.
+    async fn run_v1(&self, sql: &str) -> Result<Vec<Chunk>, Error> {
+        let stmts = parse(sql)?;
         let mut binder = Binder::new(self.catalog.clone());
         let logical_planner = LogicalPlaner::default();
         let mut optimizer = Optimizer {
@@ -196,7 +221,7 @@ impl Database {
             let optimized_plan = optimizer.optimize(logical_plan);
             debug!("optimized_plan {:#?}", optimized_plan);
 
-            let mut executor_builder = ExecutorBuilder::new(context.clone(), self.storage.clone());
+            let mut executor_builder = ExecutorBuilder::new(self.storage.clone());
             // 执行计划的每个节点构造成 Executor，
             let executor = executor_builder.build(optimized_plan);
 
@@ -248,22 +273,34 @@ pub enum Error {
         ParserError,
     ),
     #[error("bind error: {0}")]
-    Bind(
+    BindV1(
         #[source]
         #[from]
-        BindError,
+        crate::v1::binder::BindError,
+    ),
+    #[error("bind error: {0}")]
+    BindV2(
+        #[source]
+        #[from]
+        crate::binder_v2::BindError,
     ),
     #[error("logical plan error: {0}")]
-    Plan(
+    PlanV1(
         #[source]
         #[from]
-        LogicalPlanError,
+        crate::v1::logical_planner::LogicalPlanError,
     ),
     #[error("execute error: {0}")]
-    Execute(
+    ExecuteV1(
         #[source]
         #[from]
-        ExecutorError,
+        crate::v1::executor::ExecutorError,
+    ),
+    #[error("execute error: {0}")]
+    ExecuteV2(
+        #[source]
+        #[from]
+        crate::executor_v2::ExecutorError,
     ),
     #[error("Storage error: {0}")]
     StorageError(

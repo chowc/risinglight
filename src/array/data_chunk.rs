@@ -5,14 +5,17 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use super::*;
-use crate::types::DataValue;
+use crate::types::{DataValue, Row};
 
 /// A collection of arrays.
 ///
 /// A data chunk is a horizontal subset of a query result.
-#[derive(Clone, PartialEq)]
+///
+/// Note: It's valid for a [`DataChunk`] to have 0 column, but non-zero cardinality.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DataChunk {
     arrays: Arc<[ArrayImpl]>,
+    cardinality: usize,
 }
 
 impl FromIterator<ArrayImpl> for DataChunk {
@@ -23,7 +26,10 @@ impl FromIterator<ArrayImpl> for DataChunk {
             arrays.iter().map(|a| a.len()).all(|l| l == cardinality),
             "all arrays must have the same length"
         );
-        DataChunk { arrays }
+        DataChunk {
+            arrays,
+            cardinality,
+        }
     }
 }
 
@@ -40,16 +46,26 @@ impl DataChunk {
             arrays: [ArrayImpl::new_int32([item].into_iter().collect())]
                 .into_iter()
                 .collect(),
+            cardinality: 1,
+        }
+    }
+
+    /// Return a no column [`DataChunk`] with `cardinality`.
+    pub fn no_column(cardinality: usize) -> Self {
+        DataChunk {
+            arrays: Arc::new([]),
+            cardinality,
         }
     }
 
     /// Return the number of rows in the chunk.
     pub fn cardinality(&self) -> usize {
-        self.arrays.first().map(ArrayImpl::len).unwrap_or(0)
+        self.cardinality
     }
 
     /// Get reference to a row.
     pub fn row(&self, idx: usize) -> RowRef<'_> {
+        debug_assert!(idx < self.cardinality, "index out of range");
         RowRef {
             chunk: self,
             row_idx: idx,
@@ -58,7 +74,7 @@ impl DataChunk {
 
     /// Get an iterator over the rows.
     pub fn rows(&self) -> impl Iterator<Item = RowRef<'_>> {
-        (0..self.cardinality()).map(|idx| self.row(idx))
+        (0..self.cardinality).map(|idx| self.row(idx))
     }
 
     /// Get the reference of array by index.
@@ -78,7 +94,10 @@ impl DataChunk {
             .iter()
             .map(|a| a.filter(visibility.clone()))
             .collect();
-        DataChunk { arrays }
+        DataChunk {
+            arrays,
+            cardinality: visibility.filter(|b| *b).count(),
+        }
     }
 
     /// Return the number of columns.
@@ -88,8 +107,22 @@ impl DataChunk {
 
     /// Returns a slice of self that is equivalent to the given subset.
     pub fn slice(&self, range: impl RangeBounds<usize> + Clone) -> Self {
+        let begin = match range.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n + 1,
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(&n) => n + 1,
+            Bound::Excluded(&n) => n,
+            Bound::Unbounded => self.cardinality,
+        };
+        assert!(begin <= end && end <= self.cardinality, "out of range");
         let arrays = self.arrays.iter().map(|a| a.slice(range.clone())).collect();
-        DataChunk { arrays }
+        DataChunk {
+            arrays,
+            cardinality: end - begin,
+        }
     }
 
     /// Get the estimated in-memory size.
@@ -107,6 +140,16 @@ impl DataChunk {
             arrays.push(builder.finish());
         }
         arrays.into_iter().collect()
+    }
+
+    /// Concatenate two chunks in rows.
+    pub fn row_concat(self, other: Self) -> Self {
+        assert_eq!(self.cardinality(), other.cardinality());
+        self.arrays
+            .iter()
+            .chain(other.arrays.iter())
+            .cloned()
+            .collect()
     }
 }
 
@@ -131,7 +174,7 @@ impl fmt::Debug for DataChunk {
 }
 
 /// A chunk is a wrapper sturct for many data chunks.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Chunk {
     data_chunks: Vec<DataChunk>,
     header: Option<Vec<String>>,
@@ -250,5 +293,9 @@ impl RowRef<'_> {
     /// Get an iterator over the values of the row.
     pub fn values(&self) -> impl Iterator<Item = DataValue> + '_ {
         self.chunk.arrays().iter().map(|a| a.get(self.row_idx))
+    }
+
+    pub fn to_owned(&self) -> Row {
+        self.values().collect()
     }
 }

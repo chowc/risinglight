@@ -13,7 +13,7 @@ use crate::types::Interval;
 pub const UNIX_EPOCH_DAYS: i32 = 719_163;
 
 /// Date type
-#[derive(PartialOrd, PartialEq, Debug, Copy, Clone, Default, Hash, Serialize)]
+#[derive(PartialOrd, Ord, PartialEq, Eq, Debug, Copy, Clone, Default, Hash, Serialize)]
 pub struct Date(i32);
 
 impl Date {
@@ -26,6 +26,8 @@ impl Date {
         self.0
     }
 }
+
+pub type ParseDateError = chrono::ParseError;
 
 impl FromStr for Date {
     type Err = chrono::ParseError;
@@ -42,7 +44,7 @@ impl std::ops::Add<Interval> for Date {
     fn add(self, rhs: Interval) -> Self::Output {
         // Add days
         let days = self.0 + rhs.days();
-        let date = NaiveDate::from_num_days_from_ce(days + UNIX_EPOCH_DAYS);
+        let date = NaiveDate::from_num_days_from_ce_opt(days + UNIX_EPOCH_DAYS).unwrap();
 
         // Add months and years
         let mut day = date.day();
@@ -61,12 +63,17 @@ impl std::ops::Add<Interval> for Date {
         // For example, 1970.1.31 + 1 month = 1970.2.28
         day = day.min(get_month_days(year, month as usize));
 
-        Date::new(NaiveDate::from_ymd(year, month as u32, day).num_days_from_ce() - UNIX_EPOCH_DAYS)
+        Date::new(
+            NaiveDate::from_ymd_opt(year, month as u32, day)
+                .unwrap()
+                .num_days_from_ce()
+                - UNIX_EPOCH_DAYS,
+        )
     }
 }
 
 /// return the days of the `year-month`
-fn get_month_days(year: i32, month: usize) -> u32 {
+const fn get_month_days(year: i32, month: usize) -> u32 {
     const fn is_leap_year(year: i32) -> bool {
         year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
     }

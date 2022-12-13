@@ -14,7 +14,6 @@ use clap::Parser;
 use humantime::format_duration;
 use minitrace::prelude::*;
 use risinglight::array::{datachunk_to_sqllogictest_string, Chunk};
-use risinglight::executor::context::Context;
 use risinglight::storage::SecondaryStorageOptions;
 use risinglight::utils::time::RoundingDuration;
 use risinglight::Database;
@@ -45,6 +44,10 @@ struct Args {
     /// Whether to use minitrace
     #[clap(long)]
     enable_tracing: bool,
+
+    /// Whether to use tokio console.
+    #[clap(long)]
+    tokio_console: bool,
 }
 
 // human-readable message
@@ -100,46 +103,36 @@ async fn run_query_in_background(
     output_format: Option<String>,
     enable_tracing: bool,
 ) {
-    let context: Arc<Context> = Default::default();
     let start_time = Instant::now();
-    let handle = tokio::spawn({
-        let context = context.clone();
-        async move {
-            if enable_tracing {
-                let (root, collector) = Span::root("root");
-                let result = db.run_with_context(context, &sql).in_span(root).await;
-                let records: Vec<SpanRecord> = collector.collect().await;
-                println!("{records:#?}");
-                result
-            } else {
-                db.run_with_context(context, &sql).await
-            }
+    let task = async move {
+        if enable_tracing {
+            let (root, collector) = Span::root("root");
+            let result = db.run(&sql).in_span(root).await;
+            let records: Vec<SpanRecord> = collector.collect().await;
+            println!("{records:#?}");
+            result
+        } else {
+            db.run(&sql).await
         }
-    });
+    };
 
     select! {
         _ = signal::ctrl_c() => {
-            context.cancel();
+            // we simply drop the future `task` to cancel the query.
             println!("Interrupted");
         }
-        ret = handle => {
-            match ret.expect("failed to join query thread") {
+        ret = task => {
+            match ret {
                 Ok(chunks) => {
                     for chunk in chunks {
-                        print_chunk(&chunk, &output_format)
+                        print_chunk(&chunk, &output_format);
                     }
-
-                    print_execution_time(start_time)
+                    print_execution_time(start_time);
                 }
                 Err(err) => println!("{}", err),
             }
         }
     }
-
-    // Wait detached tasks if cancelled, or do nothing if query ends.
-    // Leak is guaranteed not to happen as long as all handles are joined
-    // and errors in detached tasks are properly handled.
-    context.wait().await;
 }
 
 /// Read line by line from STDIN until a line ending with `;`.
@@ -175,7 +168,7 @@ async fn interactive(
     output_format: Option<String>,
     enable_tracing: bool,
 ) -> Result<()> {
-    let mut rl = Editor::<()>::new();
+    let mut rl = Editor::<()>::new()?;
     let history_path = dirs::cache_dir().map(|p| {
         let cache_dir = p.join("risinglight");
         std::fs::create_dir_all(cache_dir.as_path()).ok();
@@ -313,14 +306,20 @@ async fn run_sqllogictest(
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let fmt_layer = tracing_subscriber::fmt::layer().compact();
-    let filter_layer =
-        tracing_subscriber::EnvFilter::from_default_env().add_directive(Level::DEBUG.into());
+    if args.tokio_console {
+        console_subscriber::init();
+    } else {
+        let fmt_layer = tracing_subscriber::fmt::layer().compact();
+        let filter_layer = tracing_subscriber::EnvFilter::from_default_env()
+            .add_directive(Level::INFO.into())
+            .add_directive("egg=warn".parse()?);
+        tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(fmt_layer)
+            .init();
+    }
 
-    tracing_subscriber::registry()
-        .with(filter_layer)
-        .with(fmt_layer)
-        .init();
+    info!("using query engine v2. type '\\v1' to use the legacy engine");
 
     let db = if args.memory {
         info!("using memory engine");

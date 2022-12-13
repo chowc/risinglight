@@ -12,13 +12,13 @@ use tokio::io::AsyncReadExt;
 
 use super::super::{Block, BlockCacheKey, Column, ColumnIndex, ColumnSeekPosition, IOBackend};
 use super::{path_of_data_column, path_of_index_column, RowSetIterator};
-use crate::binder::BoundExpr;
 use crate::catalog::ColumnCatalog;
 use crate::storage::secondary::column::ColumnReadableFile;
 use crate::storage::secondary::encode::PrimitiveFixedWidthEncode;
 use crate::storage::secondary::DeleteVector;
 use crate::storage::{StorageColumnRef, StorageResult};
 use crate::types::DataValue;
+use crate::v1::binder::BoundExpr;
 
 /// Represents a column in Secondary.
 ///
@@ -109,6 +109,10 @@ impl DiskRowset {
         self.columns[storage_column_id].clone()
     }
 
+    pub fn get_columns(&self) -> &[Column] {
+        &self.columns
+    }
+
     pub fn column_info(&self, storage_column_id: usize) -> &ColumnCatalog {
         &self.column_infos[storage_column_id]
     }
@@ -197,45 +201,33 @@ pub mod tests {
     use crate::array::ArrayImpl;
     use crate::storage::secondary::rowset::rowset_builder::RowsetBuilder;
     use crate::storage::secondary::rowset::RowsetWriter;
-    use crate::storage::secondary::ColumnBuilderOptions;
-    use crate::types::{DataTypeExt, DataTypeKind};
+    use crate::storage::secondary::{ColumnBuilderOptions, EncodeType};
+    use crate::types::DataTypeKind;
 
     pub async fn helper_build_rowset(tempdir: &TempDir, nullable: bool, len: usize) -> DiskRowset {
         let columns = vec![
             ColumnCatalog::new(
                 0,
                 if nullable {
-                    DataTypeKind::Int(None)
-                        .nullable()
-                        .to_column("v1".to_string())
+                    DataTypeKind::Int32.nullable().to_column("v1".to_string())
                 } else {
-                    DataTypeKind::Int(None)
-                        .not_null()
-                        .to_column("v1".to_string())
+                    DataTypeKind::Int32.not_null().to_column("v1".to_string())
                 },
             ),
             ColumnCatalog::new(
                 1,
                 if nullable {
-                    DataTypeKind::Int(None)
-                        .nullable()
-                        .to_column("v2".to_string())
+                    DataTypeKind::Int32.nullable().to_column("v2".to_string())
                 } else {
-                    DataTypeKind::Int(None)
-                        .not_null()
-                        .to_column("v2".to_string())
+                    DataTypeKind::Int32.not_null().to_column("v2".to_string())
                 },
             ),
             ColumnCatalog::new(
                 2,
                 if nullable {
-                    DataTypeKind::Int(None)
-                        .nullable()
-                        .to_column("v3".to_string())
+                    DataTypeKind::Int32.nullable().to_column("v3".to_string())
                 } else {
-                    DataTypeKind::Int(None)
-                        .not_null()
-                        .to_column("v3".to_string())
+                    DataTypeKind::Int32.not_null().to_column("v3".to_string())
                 },
             ),
         ];
@@ -287,17 +279,13 @@ pub mod tests {
         let columns = vec![ColumnCatalog::new(
             0,
             if nullable {
-                DataTypeKind::Int(None)
-                    .nullable()
-                    .to_column("v1".to_string())
+                DataTypeKind::Int32.nullable().to_column("v1".to_string())
             } else {
-                DataTypeKind::Int(None)
-                    .not_null()
-                    .to_column("v1".to_string())
+                DataTypeKind::Int32.not_null().to_column("v1".to_string())
             },
         )];
         let mut column_options = ColumnBuilderOptions::default_for_test();
-        column_options.is_rle = true;
+        column_options.encode_type = EncodeType::RunLength;
         let mut builder = RowsetBuilder::new(columns.clone().into(), column_options);
 
         for _ in 0..100 {
@@ -330,21 +318,17 @@ pub mod tests {
         let columns = vec![
             ColumnCatalog::new(
                 0,
-                DataTypeKind::Int(None)
+                DataTypeKind::Int32
                     .not_null()
                     .to_column_primary_key("v1".to_string()),
             ),
             ColumnCatalog::new(
                 1,
-                DataTypeKind::Int(None)
-                    .not_null()
-                    .to_column("v2".to_string()),
+                DataTypeKind::Int32.not_null().to_column("v2".to_string()),
             ),
             ColumnCatalog::new(
                 2,
-                DataTypeKind::Int(None)
-                    .not_null()
-                    .to_column("v3".to_string()),
+                DataTypeKind::Int32.not_null().to_column("v3".to_string()),
             ),
         ];
 

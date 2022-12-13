@@ -6,15 +6,19 @@ use std::iter::TrustedLen;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
+use bitvec::vec::BitVec;
 use paste::paste;
 use rust_decimal::prelude::FromStr;
 use rust_decimal::Decimal;
 
-use crate::types::{Blob, ConvertError, DataType, DataValue, Date, Interval, PhysicalDataTypeKind};
+use crate::types::{
+    Blob, ConvertError, DataType, DataTypeKind, DataValue, Date, Interval, F32, F64,
+};
 
 mod data_chunk;
 mod data_chunk_builder;
 mod iterator;
+pub mod ops;
 mod primitive_array;
 mod utf8_array;
 
@@ -48,6 +52,12 @@ pub trait ArrayBuilder: Sized + Send + Sync + 'static {
     fn new() -> Self {
         Self::with_capacity(0)
     }
+
+    fn extend_from_raw_data(&mut self, raw: &[<<Self::Array as Array>::Item as ToOwned>::Owned]);
+
+    fn extend_from_nulls(&mut self, count: usize);
+
+    fn replace_bitmap(&mut self, valid: BitVec);
 
     /// Create a new builder with `capacity`.
     fn with_capacity(capacity: usize) -> Self;
@@ -86,10 +96,12 @@ pub trait Array: Sized + Send + Sync + 'static {
     /// Type of element in the array.
     type Item: ToOwned + ?Sized;
 
-    type NonNullIterator<'a>: Iterator<Item = &'a Self::Item> + TrustedLen;
+    type RawIter<'a>: Iterator<Item = &'a Self::Item> + TrustedLen;
 
     /// Retrieve a reference to value.
     fn get(&self, idx: usize) -> Option<&Self::Item>;
+
+    fn get_unchecked(&self, idx: usize) -> &Self::Item;
 
     /// Number of items of array.
     fn len(&self) -> usize;
@@ -104,7 +116,7 @@ pub trait Array: Sized + Send + Sync + 'static {
         self.len() == 0
     }
 
-    fn non_null_iter(&self) -> Self::NonNullIterator<'_>;
+    fn raw_iter(&self) -> Self::RawIter<'_>;
 }
 
 /// An extension trait for [`Array`].
@@ -152,17 +164,20 @@ impl<A: Array> ArrayExt for A {
     }
 }
 
+pub type NullArray = PrimitiveArray<()>;
 pub type BoolArray = PrimitiveArray<bool>;
 pub type I32Array = PrimitiveArray<i32>;
 pub type I64Array = PrimitiveArray<i64>;
-pub type F64Array = PrimitiveArray<f64>;
+pub type F32Array = PrimitiveArray<F32>;
+pub type F64Array = PrimitiveArray<F64>;
 pub type DecimalArray = PrimitiveArray<Decimal>;
 pub type DateArray = PrimitiveArray<Date>;
 pub type IntervalArray = PrimitiveArray<Interval>;
 
 /// Embeds all types of arrays in `array` module.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ArrayImpl {
+    Null(Arc<NullArray>),
     Bool(Arc<BoolArray>),
     // Int16(PrimitiveArray<i16>),
     Int32(Arc<I32Array>),
@@ -176,16 +191,19 @@ pub enum ArrayImpl {
     Interval(Arc<IntervalArray>),
 }
 
+pub type NullArrayBuilder = PrimitiveArrayBuilder<()>;
 pub type BoolArrayBuilder = PrimitiveArrayBuilder<bool>;
 pub type I32ArrayBuilder = PrimitiveArrayBuilder<i32>;
 pub type I64ArrayBuilder = PrimitiveArrayBuilder<i64>;
-pub type F64ArrayBuilder = PrimitiveArrayBuilder<f64>;
+pub type F32ArrayBuilder = PrimitiveArrayBuilder<F32>;
+pub type F64ArrayBuilder = PrimitiveArrayBuilder<F64>;
 pub type DecimalArrayBuilder = PrimitiveArrayBuilder<Decimal>;
 pub type DateArrayBuilder = PrimitiveArrayBuilder<Date>;
 pub type IntervalArrayBuilder = PrimitiveArrayBuilder<Interval>;
 
 /// Embeds all types of array builders in `array` module.
 pub enum ArrayBuilderImpl {
+    Null(NullArrayBuilder),
     Bool(BoolArrayBuilder),
     // Int16(PrimitiveArrayBuilder<i16>),
     Int32(I32ArrayBuilder),
@@ -212,15 +230,34 @@ macro_rules! for_all_variants {
     ($macro:tt $(, $x:tt)*) => {
         $macro! {
             [$($x),*],
-            { Int32, int32, I32Array, I32ArrayBuilder, Int32 },
-            { Int64, int64, I64Array, I64ArrayBuilder, Int64 },
-            { Float64, float64, F64Array, F64ArrayBuilder, Float64 },
-            { Utf8, utf8, Utf8Array, Utf8ArrayBuilder, String },
-            { Blob, blob, BlobArray, BlobArrayBuilder, Blob },
-            { Bool, bool, BoolArray, BoolArrayBuilder, Bool },
-            { Decimal, decimal, DecimalArray, DecimalArrayBuilder, Decimal },
-            { Date, date, DateArray, DateArrayBuilder, Date },
-            { Interval, interval, IntervalArray, IntervalArrayBuilder, Interval }
+            { Null, (), null, NullArray, NullArrayBuilder, Null, Null },
+            { Bool, bool, bool, BoolArray, BoolArrayBuilder, Bool, Bool },
+            { Int32, i32, int32, I32Array, I32ArrayBuilder, Int32, Int32 },
+            { Int64, i64, int64, I64Array, I64ArrayBuilder, Int64, Int64 },
+            { Float64, F64, float64, F64Array, F64ArrayBuilder, Float64, Float64 },
+            { Decimal, Decimal, decimal, DecimalArray, DecimalArrayBuilder, Decimal, Decimal(_, _) },
+            { Date, Date, date, DateArray, DateArrayBuilder, Date, Date },
+            { Interval, Interval, interval, IntervalArray, IntervalArrayBuilder, Interval, Interval },
+            { Utf8, str, utf8, Utf8Array, Utf8ArrayBuilder, String, String },
+            { Blob, BlobRef, blob, BlobArray, BlobArrayBuilder, Blob, Blob }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! for_all_variants_without_null {
+    ($macro:tt $(, $x:tt)*) => {
+        $macro! {
+            [$($x),*],
+            { Bool, bool, bool, BoolArray, BoolArrayBuilder, Bool, Bool },
+            { Int32, i32, int32, I32Array, I32ArrayBuilder, Int32, Int32 },
+            { Int64, i64, int64, I64Array, I64ArrayBuilder, Int64, Int64 },
+            { Float64, F64, float64, F64Array, F64ArrayBuilder, Float64, Float64 },
+            { Decimal, Decimal, decimal, DecimalArray, DecimalArrayBuilder, Decimal, Decimal(_, _) },
+            { Date, Date, date, DateArray, DateArrayBuilder, Date, Date },
+            { Interval, Interval, interval, IntervalArray, IntervalArrayBuilder, Interval, Interval },
+            { Utf8, str, utf8, Utf8Array, Utf8ArrayBuilder, String, String },
+            { Blob, BlobRef, blob, BlobArray, BlobArrayBuilder, Blob, Blob }
         }
     };
 }
@@ -231,7 +268,7 @@ pub struct TypeMismatch;
 
 /// Implement `From` and `TryFrom` between conversions of concrete array types and enum sum type.
 macro_rules! impl_from {
-    ([], $( { $Abc:ident, $abc:ident, $AbcArray:ty, $AbcArrayBuilder:ty, $Value:ident } ),*) => {
+    ([], $( { $Abc:ident, $Type:ty, $abc:ident, $AbcArray:ty, $AbcArrayBuilder:ty, $Value:ident, $Pattern:pat } ),*) => {
         $(
             /// Implement `AbcArray -> ArrayImpl`
             impl From<$AbcArray> for ArrayImpl {
@@ -302,13 +339,14 @@ for_all_variants! { impl_from }
 
 /// Implement dispatch functions for `ArrayBuilderImpl`.
 macro_rules! impl_array_builder {
-    ([], $( { $Abc:ident, $abc:ident, $AbcArray:ty, $AbcArrayBuilder:ty, $Value:ident } ),*) => {
+    ([], $( { $Abc:ident, $Type:ty, $abc:ident, $AbcArray:ty, $AbcArrayBuilder:ty, $Value:ident, $Pattern:pat } ),*) => {
         impl ArrayBuilderImpl {
             /// Reserve at least `capacity` values.
             pub fn reserve(&mut self, capacity: usize) {
                 match self {
+                    Self::Null(a) => a.reserve(capacity),
                     $(
-                        ArrayBuilderImpl::$Abc(a) => a.reserve(capacity),
+                        Self::$Abc(a) => a.reserve(capacity),
                     )*
                 }
             }
@@ -316,17 +354,21 @@ macro_rules! impl_array_builder {
             /// Create a new array builder with the same type of given array.
             pub fn from_type_of_array(array: &ArrayImpl) -> Self {
                 match array {
-                   $(
-                       ArrayImpl::$Abc(_) => Self::$Abc(<$AbcArrayBuilder>::new()),
-                   )*
+                    ArrayImpl::Null(_) => Self::Null(NullArrayBuilder::new()),
+                    $(
+                        ArrayImpl::$Abc(_) => Self::$Abc(<$AbcArrayBuilder>::new()),
+                    )*
                 }
             }
 
-            /// Create a new array builder with the physical type
-            pub fn with_capacity_and_physical(capacity: usize, physical_type: PhysicalDataTypeKind) -> Self {
-                match physical_type {
+            /// Create a new array builder with data type
+            pub fn with_capacity(capacity: usize, ty: &DataType) -> Self {
+                use DataTypeKind::*;
+                match ty.kind() {
+                    Null => Self::Null(NullArrayBuilder::with_capacity(capacity)),
+                    Struct(_) => todo!("array of Struct type"),
                     $(
-                        PhysicalDataTypeKind::$Value => Self::$Abc(<$AbcArrayBuilder>::with_capacity(capacity)),
+                        $Pattern => Self::$Abc(<$AbcArrayBuilder>::with_capacity(capacity)),
                     )*
                 }
             }
@@ -334,6 +376,7 @@ macro_rules! impl_array_builder {
             /// Appends an element to the back of array.
             pub fn push(&mut self, v: &DataValue) {
                 match (self, v) {
+                    (Self::Null(a), DataValue::Null) => a.push(None),
                     $(
                         (Self::$Abc(a), DataValue::$Value(v)) => a.push(Some(v)),
                         (Self::$Abc(a), DataValue::Null) => a.push(None),
@@ -344,6 +387,7 @@ macro_rules! impl_array_builder {
 
             pub fn take(&mut self) -> ArrayImpl {
                 match self {
+                    Self::Null(a) => ArrayImpl::Null(a.take().into()),
                     $(
                         Self::$Abc(a) => ArrayImpl::$Abc(a.take().into()),
                     )*
@@ -353,6 +397,7 @@ macro_rules! impl_array_builder {
             /// Finish build and return a new array.
             pub fn finish(self) -> ArrayImpl {
                 match self {
+                    Self::Null(a) => ArrayImpl::Null(a.finish().into()),
                     $(
                         Self::$Abc(a) => ArrayImpl::$Abc(a.finish().into()),
                     )*
@@ -362,6 +407,7 @@ macro_rules! impl_array_builder {
             /// Appends an `ArrayImpl`
             pub fn append(&mut self, array_impl: &ArrayImpl) {
                 match (self, array_impl) {
+                    (Self::Null(builder), ArrayImpl::Null(arr)) => builder.append(arr),
                     $(
                         (Self::$Abc(builder), ArrayImpl::$Abc(arr)) => builder.append(arr),
                     )*
@@ -372,7 +418,7 @@ macro_rules! impl_array_builder {
     }
 }
 
-for_all_variants! { impl_array_builder }
+for_all_variants_without_null! { impl_array_builder }
 
 impl ArrayBuilderImpl {
     /// Create a new array builder from data type.
@@ -380,15 +426,11 @@ impl ArrayBuilderImpl {
         Self::with_capacity(0, ty)
     }
 
-    /// Create a new array builder from data type with capacity.
-    pub fn with_capacity(capacity: usize, ty: &DataType) -> Self {
-        Self::with_capacity_and_physical(capacity, ty.physical_kind())
-    }
-
     /// Appends an element in string.
     pub fn push_str(&mut self, s: &str) -> Result<(), ConvertError> {
         let null = s.is_empty();
         match self {
+            Self::Null(a) => a.push(None),
             Self::Bool(a) if null => a.push(None),
             Self::Int32(a) if null => a.push(None),
             Self::Int64(a) if null => a.push(None),
@@ -411,7 +453,7 @@ impl ArrayBuilderImpl {
                     .map_err(|e| ConvertError::ParseInt(s.to_string(), e))?,
             )),
             Self::Float64(a) => a.push(Some(
-                &s.parse::<f64>()
+                &s.parse::<F64>()
                     .map_err(|e| ConvertError::ParseFloat(s.to_string(), e))?,
             )),
             Self::Utf8(a) => a.push(Some(s)),
@@ -425,7 +467,10 @@ impl ArrayBuilderImpl {
             Self::Date(a) => a.push(Some(
                 &Date::from_str(s).map_err(|e| ConvertError::ParseDate(s.to_string(), e))?,
             )),
-            Self::Interval(_) => return Err(ConvertError::ParseInterval(s.to_string())),
+            Self::Interval(a) => a.push(Some(
+                &Interval::from_str(s)
+                    .map_err(|e| ConvertError::ParseInterval(s.to_string(), e))?,
+            )),
         }
         Ok(())
     }
@@ -433,7 +478,7 @@ impl ArrayBuilderImpl {
 
 /// Implement dispatch functions for `ArrayImpl`.
 macro_rules! impl_array {
-    ([], $( { $Abc:ident, $abc:ident, $AbcArray:ty, $AbcArrayBuilder:ty, $Value:ident } ),*) => {
+    ([], $( { $Abc:ident, $Type:ty, $abc:ident, $AbcArray:ty, $AbcArrayBuilder:ty, $Value:ident, $Pattern:pat } ),*) => {
         impl ArrayImpl {
             $(
                 paste! {
@@ -444,9 +489,15 @@ macro_rules! impl_array {
                 }
             )*
 
+            /// Create a new array of the corresponding type
+            pub fn new_null(array: NullArray) -> Self {
+                ArrayImpl::Null(array.into())
+            }
+
             /// Get the value and convert it to string.
             pub fn get_to_string(&self, idx: usize) -> String {
                 match self {
+                    Self::Null(_) => None,
                     $(
                         Self::$Abc(a) => a.get(idx).map(|v| v.to_string()),
                     )*
@@ -457,6 +508,7 @@ macro_rules! impl_array {
             /// Get the value at the given index.
             pub fn get(&self, idx: usize) -> DataValue {
                 match self {
+                    Self::Null(_) => DataValue::Null,
                     $(
                         Self::$Abc(a) => match a.get(idx) {
                             Some(val) => DataValue::$Value(val.to_owned()),
@@ -469,6 +521,7 @@ macro_rules! impl_array {
             /// Number of items of array.
             pub fn len(&self) -> usize {
                 match self {
+                    Self::Null(a) => a.len(),
                     $(
                         Self::$Abc(a) => a.len(),
                     )*
@@ -478,6 +531,7 @@ macro_rules! impl_array {
             /// Filter the elements and return a new array.
             pub fn filter(&self, visibility: impl Iterator<Item = bool>) -> Self {
                 match self {
+                    Self::Null(a) => Self::Null(a.filter(visibility).into()),
                     $(
                         Self::$Abc(a) => Self::$Abc(a.filter(visibility).into()),
                     )*
@@ -487,8 +541,19 @@ macro_rules! impl_array {
             /// Return a slice of self for the provided range.
             pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
                 match self {
+                    Self::Null(a) => Self::Null(a.slice(range).into()),
                     $(
                         Self::$Abc(a) => Self::$Abc(a.slice(range).into()),
+                    )*
+                }
+            }
+
+            /// Return a string describing the type of this array.
+            pub fn type_string(&self) -> &'static str {
+                match self {
+                    Self::Null(_) => "NULL",
+                    $(
+                        Self::$Abc(_) => stringify!($Abc),
                     )*
                 }
             }
@@ -496,7 +561,7 @@ macro_rules! impl_array {
     }
 }
 
-for_all_variants! { impl_array }
+for_all_variants_without_null! { impl_array }
 
 impl ArrayImpl {
     /// Check if array is empty.
@@ -509,6 +574,7 @@ impl ArrayImpl {
 impl From<&DataValue> for ArrayImpl {
     fn from(val: &DataValue) -> Self {
         match val {
+            DataValue::Null => Self::new_null([None].into_iter().collect()),
             &DataValue::Bool(v) => Self::new_bool([v].into_iter().collect()),
             &DataValue::Int32(v) => Self::new_int32([v].into_iter().collect()),
             &DataValue::Int64(v) => Self::new_int64([v].into_iter().collect()),
@@ -518,7 +584,6 @@ impl From<&DataValue> for ArrayImpl {
             &DataValue::Decimal(v) => Self::new_decimal([v].into_iter().collect()),
             &DataValue::Date(v) => Self::new_date([v].into_iter().collect()),
             &DataValue::Interval(v) => Self::new_interval([v].into_iter().collect()),
-            DataValue::Null => panic!("can not build array from NULL"),
         }
     }
 }
